@@ -1,6 +1,7 @@
 """Protect deployment and teardown boundaries without contacting Azure."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -10,11 +11,114 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cloud
-from bootstrap_cloud import CONTRIBUTOR_ROLE, audit_project_roles, read_settings
+from bootstrap_cloud import CONTRIBUTOR_ROLE, audit_project_roles, ensure_federation, production_subject, read_settings
 
 ENV = {"AZURE_RESOURCE_GROUP": "rg-rolloff-ready", "AZURE_SUBSCRIPTION_ID": "subscription", "GITHUB_REPOSITORY": "owner/rolloff-ready"}
 TAGS = {"project": "rolloff-ready", "managedBy": "rolloff-ready-bicep", "repository": "owner/rolloff-ready"}
 GROUP = {"name": "rg-rolloff-ready", "id": "/subscriptions/subscription/resourceGroups/rg-rolloff-ready", "tags": TAGS}
+
+
+class OidcSubjectTests(unittest.TestCase):
+    repository = "owner/rolloff-ready"
+    metadata = {"full_name": repository, "id": 1234, "owner": {"id": 5678}}
+    prefix = "repo:owner@5678/rolloff-ready@1234"
+    subject = prefix + ":environment:production"
+    credential = {"name": "rolloff-ready-production", "issuer": "https://token.actions.githubusercontent.com",
+                  "subject": subject, "audiences": ["api://AzureADTokenExchange"]}
+
+    def resolve(self, settings, metadata=None):
+        with patch("bootstrap_cloud.gh", side_effect=[self.metadata if metadata is None else metadata, settings]) as github:
+            value = production_subject(self.repository)
+            self.assertEqual(github.call_args_list, [call("api", "repos/owner/rolloff-ready"),
+                                                    call("api", "repos/owner/rolloff-ready/actions/oidc/customization/sub")])
+            return value
+
+    def test_immutable_subject_uses_verified_api_prefix_and_environment(self):
+        self.assertEqual(self.resolve({"use_default": True, "use_immutable_subject": True,
+                                       "sub_claim_prefix": self.prefix}), self.subject)
+
+    def test_immutable_without_prefix_uses_verified_repository_ids(self):
+        self.assertEqual(self.resolve({"use_default": True, "use_immutable_subject": True}), self.subject)
+
+    def test_legacy_default_subject_with_or_without_explicit_prefix(self):
+        for settings in ({"use_default": True}, {"use_default": True, "use_immutable_subject": False,
+                                                 "sub_claim_prefix": "repo:owner/rolloff-ready"}):
+            self.assertEqual(self.resolve(settings), "repo:owner/rolloff-ready:environment:production")
+
+    def test_rejects_custom_templates_without_writing_settings(self):
+        for settings in ({"use_default": False, "include_claim_keys": ["repo", "context"]},
+                         {"use_default": False, "include_claim_keys": ["job_workflow_ref"]}, {}, None):
+            with self.subTest(settings=settings), patch("bootstrap_cloud.gh", side_effect=[self.metadata, settings]) as github:
+                with self.assertRaisesRegex(RuntimeError, "Custom GitHub OIDC"):
+                    production_subject(self.repository)
+                self.assertTrue(all("--method" not in item.args for item in github.call_args_list))
+
+    def test_rejects_prefix_for_wrong_repository_owner_or_numeric_ids(self):
+        prefixes = ("repo:other@5678/rolloff-ready@1234", "repo:owner@5678/other@1234",
+                    "repo:owner@9999/rolloff-ready@1234", "repo:owner@5678/rolloff-ready@9999",
+                    "repo:owner/rolloff-ready", self.prefix + ":ref:refs/heads/main", "", None)
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix), self.assertRaises(RuntimeError):
+                self.resolve({"use_default": True, "use_immutable_subject": True, "sub_claim_prefix": prefix})
+
+    def test_rejects_redirected_repository_or_invalid_identity_metadata(self):
+        metadata_cases = ({**self.metadata, "full_name": "other/rolloff-ready"},
+                          {**self.metadata, "id": "1234"}, {**self.metadata, "id": True},
+                          {**self.metadata, "owner": []}, {**self.metadata, "owner": {"id": 0}})
+        for metadata in metadata_cases:
+            with self.subTest(metadata=metadata), self.assertRaises(RuntimeError):
+                self.resolve({"use_default": True, "use_immutable_subject": True}, metadata)
+        with self.assertRaises(RuntimeError):
+            self.resolve({"use_default": True, "use_immutable_subject": "true"})
+        with self.assertRaises(RuntimeError):
+            self.resolve({"use_default": True, "use_immutable_subject": False, "sub_claim_prefix": self.prefix})
+
+    def test_matching_federation_is_read_only(self):
+        with patch("bootstrap_cloud.az", return_value=[{**self.credential, "id": "credential-id"}]) as azure:
+            ensure_federation("app-id", self.repository, self.subject)
+            azure.assert_called_once_with("ad", "app", "federated-credential", "list", "--id", "app-id")
+
+    def test_creates_missing_federation_or_upgrades_only_exact_legacy_trust(self):
+        legacy = {**self.credential, "id": "credential-id", "description": "Preserve this description",
+                  "subject": "repo:owner/rolloff-ready:environment:production"}
+        for existing, operation in (([], "create"), ([legacy], "update")):
+            paths = []
+            def fake_azure(*args):
+                if args[3] == "list":
+                    return existing
+                self.assertEqual(args[3], operation)
+                if operation == "update":
+                    self.assertEqual(args[6:8], ("--federated-credential-id", "credential-id"))
+                path = Path(args[-1][1:])
+                paths.append(path)
+                parameters = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(parameters["subject"], self.subject)
+                for key in ("name", "issuer", "audiences"):
+                    self.assertEqual(parameters[key], self.credential[key])
+                if operation == "update":
+                    self.assertEqual(parameters["description"], legacy["description"])
+            with self.subTest(operation=operation), patch("bootstrap_cloud.az", side_effect=fake_azure) as azure:
+                ensure_federation("app-id", self.repository, self.subject)
+                self.assertEqual(azure.call_count, 2)
+                self.assertTrue(paths)
+                self.assertFalse(any(path.exists() for path in paths))
+
+    def test_never_overwrites_unrelated_or_weaker_trust(self):
+        legacy = {**self.credential, "id": "credential-id", "subject": "repo:owner/rolloff-ready:environment:production"}
+        changes = ({"issuer": "https://other.example"}, {"audiences": ["other"]},
+                   {"subject": "repo:other/rolloff-ready:environment:production"},
+                   {"subject": "repo:owner/rolloff-ready:ref:refs/heads/main"},
+                   {"subject": "repo:owner@5678/rolloff-ready@9999:environment:production"},
+                   {"claimsMatchingExpression": {"value": "*"}}, {"id": None})
+        for change in changes:
+            with self.subTest(change=change), patch("bootstrap_cloud.az", return_value=[{**legacy, **change}]) as azure:
+                with self.assertRaises(RuntimeError):
+                    ensure_federation("app-id", self.repository, self.subject)
+                self.assertEqual(azure.call_count, 1)
+        with patch("bootstrap_cloud.az", return_value=[self.credential]) as azure:
+            with self.assertRaises(RuntimeError):
+                ensure_federation("app-id", self.repository, legacy["subject"])
+            self.assertEqual(azure.call_count, 1)  # Never downgrade immutable to name-only.
 
 
 class DeploymentSafetyTests(unittest.TestCase):

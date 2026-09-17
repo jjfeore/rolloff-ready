@@ -47,6 +47,72 @@ def read_settings(path: Path) -> dict[str, str]:
     return result
 
 
+def production_subject(repository: str) -> str:
+    """Resolve GitHub's default subject without changing its OIDC settings."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise RuntimeError("Repository must be owner/repository.")
+    metadata = gh("api", f"repos/{repository}")
+    settings = gh("api", f"repos/{repository}/actions/oidc/customization/sub")
+    if not isinstance(settings, dict) or settings.get("use_default") is not True:
+        raise RuntimeError("Custom GitHub OIDC subject templates are not supported. No OIDC settings were changed.")
+    full_name = metadata.get("full_name") if isinstance(metadata, dict) else None
+    if not isinstance(full_name, str) or full_name.lower() != repository.lower():
+        raise RuntimeError("GitHub repository identity does not match the requested repository.")
+    immutable = settings.get("use_immutable_subject", False)
+    if type(immutable) is not bool:
+        raise RuntimeError("GitHub returned an invalid immutable OIDC setting.")
+    expected = f"repo:{full_name}"
+    if immutable:
+        owner_info = metadata.get("owner")
+        owner_id = owner_info.get("id") if isinstance(owner_info, dict) else None
+        repo_id = metadata.get("id")
+        if any(type(value) is not int or value <= 0 for value in (owner_id, repo_id)):
+            raise RuntimeError("GitHub immutable OIDC subject requires verified owner and repository IDs.")
+        owner, name = full_name.split("/")
+        expected = f"repo:{owner}@{owner_id}/{name}@{repo_id}"
+    # The API prefix is authoritative; compare it against independently read
+    # repository identity before appending the fixed environment context.
+    prefix = settings.get("sub_claim_prefix", expected)
+    if not isinstance(prefix, str) or prefix != expected:
+        raise RuntimeError("GitHub OIDC subject prefix does not match this repository and its immutable setting.")
+    return prefix + ":environment:production"
+
+
+def ensure_federation(app_id: str, repository: str, subject: str) -> None:
+    """Create the trust, or narrowly upgrade this repo's old default subject."""
+    credential = {"name": "rolloff-ready-production", "issuer": "https://token.actions.githubusercontent.com", "subject": subject, "audiences": ["api://AzureADTokenExchange"]}
+    credentials = az("ad", "app", "federated-credential", "list", "--id", app_id)
+    existing = [item for item in credentials if item.get("name") == credential["name"]]
+    if len(existing) > 1:
+        raise RuntimeError("Multiple production OIDC credentials found. Refusing to modify trust.")
+    operation, identifier = "create", ()
+    if existing:
+        current = existing[0]
+        if all(current.get(key) == value for key, value in credential.items()):
+            return
+        owner, name = repository.split("/")
+        immutable_pattern = rf"repo:{re.escape(owner)}@[1-9][0-9]*/{re.escape(name)}@[1-9][0-9]*:environment:production"
+        can_upgrade = (
+            current.get("subject") == f"repo:{repository}:environment:production"
+            and re.fullmatch(immutable_pattern, subject) is not None
+            and all(current.get(key) == credential[key] for key in ("name", "issuer", "audiences"))
+            and not current.get("claimsMatchingExpression")
+            and isinstance(current.get("id"), str) and bool(current["id"])
+        )
+        if not can_upgrade:
+            raise RuntimeError("Existing OIDC federation differs. Refusing to overwrite another trust relationship.")
+        operation, identifier = "update", ("--federated-credential-id", current["id"])
+        if "description" in current:
+            credential["description"] = current["description"]
+    with tempfile.NamedTemporaryFile(mode="w", prefix="rolloff-oidc-", suffix=".json", encoding="utf-8", delete=False) as temp:
+        json.dump(credential, temp)
+        path = Path(temp.name)
+    try:
+        az("ad", "app", "federated-credential", operation, "--id", app_id, *identifier, "--parameters", f"@{path}")
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def ensure_environment(repository: str) -> None:
     route = f"repos/{repository}/environments/production"
     environment = gh("api", route, allow_missing=True)
@@ -107,6 +173,7 @@ def bootstrap(args) -> None:
     for name in ("AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID"):
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", settings[name]):
             raise RuntimeError(f"{name} must be an Azure identifier.")
+    subject = production_subject(args.repository)
     os.environ.update({"AZURE_SUBSCRIPTION_ID": settings["AZURE_SUBSCRIPTION_ID"], "AZURE_RESOURCE_GROUP": args.resource_group, "GITHUB_REPOSITORY": args.repository})
     if args.login:
         # User-invoked browser sign-in. Azure CLI handles credentials directly.
@@ -146,20 +213,7 @@ def bootstrap(args) -> None:
     principal = principal[0] if principal else az("ad", "sp", "create", "--id", app["appId"])
     scope = f"/subscriptions/{settings['AZURE_SUBSCRIPTION_ID']}/resourceGroups/{args.resource_group}"
     assignments = audit_project_roles(principal["id"], settings["AZURE_SUBSCRIPTION_ID"], scope)
-    credential = {"name": "rolloff-ready-production", "issuer": "https://token.actions.githubusercontent.com", "subject": f"repo:{args.repository}:environment:production", "audiences": ["api://AzureADTokenExchange"]}
-    credentials = az("ad", "app", "federated-credential", "list", "--id", app["id"])
-    existing = [item for item in credentials if item["name"] == credential["name"]]
-    if existing:
-        if any(existing[0].get(key) != value for key, value in credential.items()):
-            raise RuntimeError("Existing OIDC federation differs. Refusing to overwrite another trust relationship.")
-    else:
-        with tempfile.NamedTemporaryFile(mode="w", prefix="rolloff-oidc-", suffix=".json", encoding="utf-8", delete=False) as temp:
-            json.dump(credential, temp)
-            path = Path(temp.name)
-        try:
-            az("ad", "app", "federated-credential", "create", "--id", app["id"], "--parameters", f"@{path}")
-        finally:
-            path.unlink(missing_ok=True)
+    ensure_federation(app["id"], args.repository, subject)
     if not assignments:
         az("role", "assignment", "create", "--assignee-object-id", principal["id"], "--assignee-principal-type", "ServicePrincipal", "--role", CONTRIBUTOR_ROLE, "--scope", scope)
     values = {"AZURE_SUBSCRIPTION_ID": settings["AZURE_SUBSCRIPTION_ID"], "AZURE_TENANT_ID": settings["AZURE_TENANT_ID"], "AZURE_CLIENT_ID": app["appId"], "HERE_MAPS_API_KEY": settings["HERE_MAPS_API_KEY"]}
