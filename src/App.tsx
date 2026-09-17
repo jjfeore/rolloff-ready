@@ -4,6 +4,7 @@ import catalog from '../api/rr/catalog.json';
 import { errorMessage, getConfig, post } from './api';
 import { destination, distance, normalizeBearing } from './geometry';
 import Icon from './Icons';
+import MapErrorBoundary from './MapErrorBoundary';
 import type { Address, Answers, Assessment, AssessmentInput, Config, Customer, Grade, Placement, Size } from './types';
 
 const PlacementMap = lazy(() => import('./PlacementMap'));
@@ -99,7 +100,12 @@ function App() {
 
   useEffect(() => { getConfig().then(setConfig).catch(error => setConfigError(errorMessage(error))); }, []);
   useEffect(() => {
-    sidebar.current?.scrollTo({ top: 0, behavior: 'instant' });
+    if (window.matchMedia('(max-width: 700px)').matches) {
+      if (stage < 2) window.scrollTo({ top: 0, behavior: 'instant' });
+      else sidebar.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
+    } else {
+      sidebar.current?.scrollTo({ top: 0, behavior: 'instant' });
+    }
     heading.current?.focus({ preventScroll: true });
   }, [stage]);
 
@@ -187,6 +193,7 @@ function App() {
     const summary = [
       'ROLLOFF READY | SITE SUMMARY',
       `Created: ${new Date().toISOString()}`,
+      `Site/request reference: ${accepted?.requestId ?? requestId.current}`,
       accepted ? `Email provider accepted request: ${accepted.requestId}` : 'This is a downloaded summary. Downloading does not send a quote request.',
       '', `Result: ${assessment.headline}`, assessment.summary,
       ...assessment.reasons.map(reason => `- ${reason}`), '',
@@ -241,7 +248,7 @@ function App() {
             {candidates ? <div className="candidate-results" aria-live="polite">{candidates.length ? <><p className="candidate-heading">Choose your delivery address</p><ul>{candidates.map(item => <li key={item.id}><button onClick={() => selectAddress(item)}><Icon name="pin" size={18} /><span>{item.label}</span><Icon name="chevron" size={16} /></button></li>)}</ul></> : <p className="no-results">We couldn’t find that street address. Add a house number, city and state, then try again. US addresses only.</p>}</div> : null}
           </div>
           <ModelNotes />
-          <div className="quiet-note"><Icon name="shield" size={18} /><p>Your site details stay in this session until you choose to send a request.</p></div>
+          <div className="quiet-note"><Icon name="shield" size={18} /><p>Your answers stay in this tab until you send a request. Address searches use HERE.</p></div>
         </> : null}
 
         {stage === 1 && address && placement ? <>
@@ -302,12 +309,12 @@ function App() {
               <fieldset disabled={sending} className="contact-fields">
                 <label htmlFor="name">Your name <span>required</span></label><input id="name" autoComplete="name" value={customer.name} onChange={event => updateCustomer('name', event.target.value)} required maxLength={100} />
                 <label htmlFor="email">Email address <span>required</span></label><input id="email" type="email" autoComplete="email" value={customer.email} onChange={event => updateCustomer('email', event.target.value)} required maxLength={254} />
-                <label htmlFor="phone">Phone <span>optional</span></label><input id="phone" type="tel" autoComplete="tel" value={customer.phone} onChange={event => updateCustomer('phone', event.target.value)} maxLength={40} />
+                <label htmlFor="phone">Phone <span>optional</span></label><input id="phone" type="tel" autoComplete="tel" value={customer.phone} onChange={event => updateCustomer('phone', event.target.value)} maxLength={35} />
                 <label htmlFor="notes">Anything else we should know? <span>optional</span></label><textarea id="notes" rows={3} placeholder="Gate access, delivery timing, or a detail you’d like us to check…" value={customer.notes} onChange={event => updateCustomer('notes', event.target.value)} maxLength={2000} /><span className="character-count">{customer.notes.length}/2,000</span>
                 <div className="honeypot" aria-hidden="true"><label htmlFor="website">Leave this field blank</label><input id="website" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={event => setWebsite(event.target.value)} /></div>
                 <label className="checkbox-label consent"><input type="checkbox" checked={customer.consent} onChange={event => updateCustomer('consent', event.target.checked)} required /><span>I agree to share my contact information and site details with the operator for this request.</span></label>
               </fieldset>
-              {sendError ? <Alert>{sendError} You can also save your summary below.</Alert> : null}
+              {sendError ? <Alert>{sendError} You can also save your summary below.<p className="request-reference">Request reference<br /><code>{requestId.current}</code></p></Alert> : null}
               <button type="submit" className="button primary full" disabled={sending || !config?.emailConfigured}>{sending ? <><span className="spinner" /> Sending your request</> : <><Icon name="mail" size={18} /> {assessment.outcome === 'likely_suitable' ? 'Send quote request' : 'Send review request'}</>}</button>
               <button type="button" className="button secondary full download-button" onClick={downloadSummary}><Icon name="download" size={18} /> Download site summary</button><p className="download-caption">Downloading saves a file. It does not send a request.</p>
             </form>
@@ -318,7 +325,7 @@ function App() {
 
       <section className={`map-workspace ${stage === 0 ? 'preview-mode' : ''}`} aria-label={stage === 0 ? 'How the placement check works' : 'Your site map'}>
         {stage === 0 || !address || !placement ? <PlanPreview size={size} /> : <>
-          <Suspense fallback={<div className="map-fallback"><span className="spinner" /> Opening your site map…</div>}><PlacementMap address={address} placement={placement} onChange={movePlacement} attribution={config?.attribution ?? '© HERE'} editable={stage === 1} recenter={recenter} onReady={setMapReady} /></Suspense>
+          <MapErrorBoundary key={address.id} onReady={setMapReady}><Suspense fallback={<div className="map-fallback"><span className="spinner" /> Opening your site map…</div>}><PlacementMap address={address} placement={placement} onChange={movePlacement} attribution={config?.attribution ?? '© HERE'} editable={stage === 1} recenter={recenter} onReady={setMapReady} /></Suspense></MapErrorBoundary>
           <div className="map-bottom-card"><span className="map-bottom-icon"><Icon name={stage === 1 ? 'move' : stage === 2 ? 'shield' : 'box'} size={23} /></span><div><strong>{stage === 1 ? 'One connected footprint. Two things to fit.' : stage === 2 ? 'A map can’t see everything.' : 'Your placement, ready to share.'}</strong><p>{stage === 1 ? 'Drag the box to move. Drag the round handle to rotate. Fine-tune with the controls.' : stage === 2 ? 'Look beyond the image: overhead wires, uneven ground and the approach all matter.' : `${size} yd³ container · ${(dimensions.lengthFeet + catalog.truck.lengthFeet).toFixed(1)} ft total straight clearance · final fit confirmed by your operator`}</p></div><span className="map-card-step">0{stage + 1} / 04</span></div>
         </>}
       </section>

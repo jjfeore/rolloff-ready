@@ -23,6 +23,7 @@ export default function PlacementMap(props: Props) {
   const [tileError, setTileError] = useState(false);
   const [boundaryError, setBoundaryError] = useState(false);
   const [tilesLoading, setTilesLoading] = useState(true);
+  const [mapZoom, setMapZoom] = useState(20);
   current.current = props;
 
   useEffect(() => { props.onReady(!tilesLoading && !tileError); }, [tilesLoading, tileError, props.onReady]);
@@ -32,12 +33,14 @@ export default function PlacementMap(props: Props) {
     setTileError(false);
     setTilesLoading(true);
     const latest = current.current;
-    const map = L.map(host.current, { zoomControl: false, minZoom: 14, maxZoom: 20, zoomSnap: 0.5, scrollWheelZoom: true }).setView(latest.address.position, 19);
+    const map = L.map(host.current, { zoomControl: false, minZoom: 14, maxZoom: 22, zoomSnap: 0.5, scrollWheelZoom: true }).setView(latest.address.position, 20);
+    setMapZoom(20);
+    map.on('zoomend', () => setMapZoom(map.getZoom()));
     L.control.zoom({ position: 'topright' }).addTo(map);
     L.control.scale({ position: 'bottomleft', imperial: true, metric: false, maxWidth: 120 }).addTo(map);
     const attributionNode = document.createElement('span');
     attributionNode.textContent = latest.attribution;
-    const tiles = L.tileLayer('/api/tiles/{z}/{x}/{y}', { minZoom: 14, maxZoom: 20, maxNativeZoom: 20, attribution: `${attributionNode.innerHTML} · <a href="https://legal.here.com/en-gb/terms/general-content-supplier-terms-and-notices" target="_blank" rel="noopener noreferrer">HERE notices</a>` });
+    const tiles = L.tileLayer('/api/tiles/{z}/{x}/{y}', { minZoom: 14, maxZoom: 22, maxNativeZoom: 20, attribution: `${attributionNode.innerHTML} · <a href="https://legal.here.com/en-gb/terms/general-content-supplier-terms-and-notices" target="_blank" rel="noopener noreferrer">HERE notices</a>` });
     tiles.on('loading', () => setTilesLoading(true));
     tiles.on('load', () => setTilesLoading(false));
     tiles.on('tileerror', () => { setTileError(true); setTilesLoading(false); });
@@ -129,11 +132,20 @@ export default function PlacementMap(props: Props) {
     else { layer.center.dragging?.disable(); layer.rotation.dragging?.disable(); }
   }, [props.placement, props.editable, props.address.id]);
 
-  useEffect(() => { layers.current?.map.setView(current.current.placement, 19); }, [props.recenter]);
+  useEffect(() => {
+    const map = layers.current?.map;
+    if (!map) return;
+    const placement = current.current.placement;
+    const dimensions = catalog.containers.find(item => item.size === placement.containerSize)!;
+    const shape = footprints(placement, placement.bearingDegrees, dimensions.lengthFeet, dimensions.widthFeet, catalog.truck.lengthFeet);
+    const bounds = L.latLngBounds(latLngs([...shape.container, ...shape.truck, shape.rotationHandle]));
+    map.fitBounds(bounds, { paddingTopLeft: [32, 48], paddingBottomRight: [32, 56], maxZoom: 20, animate: false });
+  }, [props.recenter, props.address.id]);
 
   return <div className="live-map">
     <div ref={host} className="leaflet-host" aria-label="Satellite map of your selected address with container and truck clearance footprints" />
     <div className="map-top-label"><span className="live-dot" /> SATELLITE VIEW <span className="map-label-divider" /> <span>North up</span></div>
+    {mapZoom > 20 ? <div className="imagery-enlarged">Imagery enlarged · no additional detail</div> : null}
     {tilesLoading && !tileError ? <div className="map-loading" role="status"><span className="spinner" /> Loading satellite imagery</div> : null}
     {tileError ? <div className="map-error" role="alert"><Icon name="info" /><div><strong>Satellite imagery could not load.</strong><p>Check your connection and retry before confirming your placement.</p><button onClick={() => { setTileError(false); setTilesLoading(true); layers.current?.tiles.redraw(); }}>Retry imagery</button></div></div> : null}
     {boundaryError ? <div className="map-boundary" role="status">Keep your placement near the selected address.</div> : null}

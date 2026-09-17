@@ -90,6 +90,47 @@ class HereClientTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, 400)
         self.client._opener.open.assert_not_called()
 
+    def test_explicit_canadian_endings_are_rejected_before_us_approximation(self):
+        # HERE may return Vancouver, Washington when the input explicitly names
+        # Vancouver, Canada. Never send those inputs to the US-filtered search.
+        for query in (
+            "453 W 12th Ave, Vancouver, BC, Canada",
+            "453 W 12th Ave Vancouver Canada",
+            "453 W 12th Ave, Vancouver, BC, cAnAdA.  ",
+            "453 W 12th Ave, Vancouver, BC",
+            "453 W 12th Ave, Vancouver, bc, ",
+            "453 W 12th Ave, Vancouver V5Y 1V4",
+            "453 W 12th Ave, Vancouver V5Y1V4",
+            "100 Queen St, Toronto, ON M5H 2N2",
+            "100 Queen St, Toronto, ON",
+            "100 Main St, Montreal, QC",
+        ):
+            with self.subTest(query=query), self.assertRaises(Problem) as caught:
+                self.client.geocode(query)
+            self.assertEqual(caught.exception.status, 400)
+            self.assertEqual(caught.exception.code, "US_ONLY")
+            self.assertNotIn(query, caught.exception.message)
+        self.client._opener.open.assert_not_called()
+
+    def test_us_names_and_streets_containing_canada_are_preserved(self):
+        self.respond(Response({"items": [address()]}))
+        for query in (
+            "123 Canada Road, Woodside, CA 94062",
+            "123 Canada Rd",
+            "123 Canada Road",
+            "453 W 12th St, Vancouver, WA 98660",
+            "100 Main St, Ontario, CA 91761",
+            "100 Main St, Canadian, TX 79014",
+            "123 On Street, Seattle, WA",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(len(self.client.geocode(query)), 1)
+                request = self.client._opener.open.call_args.args[0]
+                params = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+                self.assertEqual(params["q"], [query])
+                self.assertEqual(params["in"], ["countryCode:USA"])
+        self.assertEqual(self.client._opener.open.call_count, 7)
+
     def test_tile_is_fixed_jpeg_and_bounded(self):
         response = Response(b"\xff\xd8\xfftest\xff\xd9", "image/jpeg")
         self.respond(response)

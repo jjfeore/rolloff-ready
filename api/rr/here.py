@@ -3,6 +3,7 @@
 import datetime
 import json
 import math
+import re
 import socket
 import ssl
 import threading
@@ -21,6 +22,16 @@ ATTRIBUTION_RETRY_SECONDS = 60
 GEOCODE_MAX_BYTES = 256 * 1024
 TILE_MAX_BYTES = 1024 * 1024
 COPYRIGHT_MAX_BYTES = 512 * 1024
+
+# These explicit Canadian endings must not be approximated into a US address
+# by the provider's country filter. This is deliberately not a global address
+# parser: province abbreviations require a comma, and street names are intact.
+_CANADIAN_ENDING = re.compile(
+    r"(?:\bcanada|"
+    r"(?:^|[\s,])[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z][ -]?\d[ABCEGHJ-NPRSTV-Z]\d|"
+    r",\s*(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT))$",
+    re.IGNORECASE,
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -104,6 +115,8 @@ class HereClient:
     def geocode(self, query):
         if not isinstance(query, str) or not 3 <= len(query.strip()) <= 250 or any(ord(c) < 32 for c in query):
             raise Problem(400, "INVALID_INPUT", "Enter a United States street address using 3–250 characters.")
+        if _CANADIAN_ENDING.search(query.rstrip(" ,.")):
+            raise Problem(400, "US_ONLY", "Rolloff Ready currently supports United States addresses. Enter a US street address.")
         data = self._json("geocode.search.hereapi.com", "/v1/geocode", {
             "q": query.strip(), "in": "countryCode:USA", "limit": 5,
         }, GEOCODE_MAX_BYTES)
