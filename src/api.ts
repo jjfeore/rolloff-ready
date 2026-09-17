@@ -25,19 +25,20 @@ export async function getConfig(refresh = false): Promise<Config> {
   return pendingConfiguration;
 }
 
-export async function post<T>(path: 'geocode' | 'grade' | 'assess' | 'contact', body: unknown, retry = true): Promise<T> {
+export async function post<T>(path: 'geocode' | 'terrain-coverage' | 'grade' | 'assess' | 'contact', body: unknown, retry = true, signal?: AbortSignal): Promise<T> {
   const config = await getConfig();
+  signal?.throwIfAborted();
   try {
     return await decode<T>(await fetch(`/api/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Rolloff-Token': config.formToken },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(path === 'contact' ? 45000 : 20000),
+      signal: AbortSignal.any([AbortSignal.timeout(path === 'contact' ? 45000 : 25000), ...(signal ? [signal] : [])]),
     }));
   } catch (error) {
     if (error instanceof ApiError && error.code === 'TOKEN_EXPIRED' && retry) {
       await getConfig(true);
-      return post<T>(path, body, false);
+      return post<T>(path, body, false, signal);
     }
     throw error;
   }

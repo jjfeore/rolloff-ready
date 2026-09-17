@@ -65,6 +65,52 @@ class Tokens:
         if not valid:
             raise Problem(400, "ADDRESS_NOT_VERIFIED", "Search for and select your US address again before continuing.")
 
+    def _terrain_site(self, address, placement):
+        footprint = [f"{placement['lat']:.7f}", f"{placement['lng']:.7f}",
+                     f"{placement['bearingDegrees']:.6f}", placement["containerSize"]]
+        binding = self._address_data(address) + ":" + json.dumps(footprint, separators=(",", ":"))
+        return hashlib.sha256(binding.encode("utf-8")).hexdigest()
+
+    def sign_terrain(self, address, placement, result):
+        # Bind the exact reviewed placement and trusted provider result together.
+        # The token carries data, not a credential, and requires no shared store.
+        raw = json.dumps({"version": 1, "issuedAt": int(self.clock()),
+                          "site": self._terrain_site(address, placement), "result": result},
+                         ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        signature = hmac.new(self.secret, ("terrain:" + encoded).encode(), hashlib.sha256).hexdigest()
+        token = encoded + "." + signature
+        if len(token) > 8192:
+            raise ValueError("Terrain evidence exceeded its bounded size")
+        return token
+
+    def verify_terrain(self, token, address, placement):
+        try:
+            if not isinstance(token, str) or len(token) > 8192:
+                raise ValueError()
+            encoded, signature = token.split(".")
+            expected = hmac.new(self.secret, ("terrain:" + encoded).encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, signature):
+                raise ValueError()
+            raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+            payload = json.loads(raw)
+            if (not isinstance(payload, dict) or payload.get("version") != 1
+                    or type(payload.get("issuedAt")) is not int
+                    or payload.get("site") != self._terrain_site(address, placement)):
+                raise ValueError()
+            age = self.clock() - payload["issuedAt"]
+            if age < -5:
+                raise ValueError()
+            if age > 7200:
+                raise Problem(400, "TERRAIN_EVIDENCE_EXPIRED", "Refresh the terrain estimates for this placement before continuing.")
+            result = payload.get("result")
+            if (not isinstance(result, dict) or result.get("status") not in ("available", "unavailable")
+                    or result.get("source") != "USGS 3DEP"):
+                raise ValueError()
+            return result
+        except (KeyError, TypeError, ValueError, AttributeError, UnicodeError, RecursionError):
+            raise Problem(400, "TERRAIN_EVIDENCE_INVALID", "The terrain estimate does not match this placement. Refresh the estimates before continuing.") from None
+
 
 class RateLimiter:
     def __init__(self, clock=time.monotonic):

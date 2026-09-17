@@ -35,7 +35,7 @@ def text(value, label, maximum, minimum=1):
 
 
 def number(value, label, minimum, maximum):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or (isinstance(value, float) and not math.isfinite(value)):
         invalid(f"{label} must be a finite number.")
     if value < minimum or value > maximum:
         invalid(f"{label} is outside the supported range.")
@@ -79,21 +79,30 @@ def distance_m(a, b):
     return 6371008.8 * 2 * math.asin(math.sqrt(min(1, h)))
 
 
-def assessment_input(value):
-    value = obj(value, "Assessment")
-    raw_address = obj(value.get("address"), "Address")
+def selected_address(value):
+    raw_address = obj(value, "Address")
     if raw_address.get("countryCode") != "USA":
         invalid("Rolloff Ready currently supports United States addresses.")
-    address = {
+    return {
         "id": text(raw_address.get("id"), "a selected address", 350),
         "label": text(raw_address.get("label"), "the street address", 500),
         "position": point(raw_address.get("position"), "Address"),
         "countryCode": "USA",
         "verification": text(raw_address.get("verification"), "a verified address selection", 160),
     }
+
+
+def site_input(value):
+    value = obj(value, "Site")
+    address = selected_address(value.get("address"))
     spot = placement(value.get("placement"))
     if distance_m(address["position"], spot) > 250:
         invalid("Keep the container within 250 metres of the selected address.")
+    return {"address": address, "placement": spot}
+
+
+def assessment_input(value):
+    site = site_input(value)
     raw = obj(value.get("answers"), "Site answers")
     clean = {}
     enums = {
@@ -111,7 +120,7 @@ def assessment_input(value):
         if raw.get("inlineDirection") not in ("uphill", "downhill", "unsure"):
             invalid("Tell us which way the drop site slopes from the truck.")
         clean["inlineDirection"] = raw["inlineDirection"]
-    return {"address": address, "placement": spot, "answers": clean}
+    return {**site, "answers": clean}
 
 
 def assess(data):
@@ -178,8 +187,33 @@ def email_content(data, person, result, request_id):
              f"Map: https://www.google.com/maps/search/?api=1&query={p['lat']:.7f}%2C{p['lng']:.7f}",
              "", "SITE ANSWERS"]
     lines.extend(f"{labels[key]}: {answer}" for key, answer in a.items())
+    lines.extend(terrain_summary(data.get("terrain")))
     lines.extend(["", "SCREENING RESULT", result["headline"], *result["reasons"], result["summary"],
                   "", "PROJECT NOTES", person["notes"] or "None", "",
-                  "Customer consented to send these details. Screening is based on customer answers; satellite imagery and a representative footprint do not approve delivery.",
+                  "Customer consented to send these details. Screening is based on customer answers. USGS terrain estimates are advisory; satellite imagery and a representative footprint do not approve delivery.",
                   "No measured driveway slope, curb transition, swept turning path, load-bearing capacity, or overhead survey is included."])
     return f"Rolloff Ready | {heading} | {p['containerSize']} yd", "\n".join(lines)
+
+
+def terrain_summary(terrain):
+    """Only server-issued, verified terrain evidence reaches this formatter."""
+    lines = ["", "USGS TERRAIN ESTIMATE (ADVISORY)"]
+    if not terrain:
+        return lines + ["No verified elevation estimate was attached. Use the customer's site answers."]
+    lines.extend([f"Source: {terrain['source']}", terrain["message"]])
+    if terrain["status"] != "available":
+        return lines
+    along, across = terrain["along"], terrain["across"]
+    lines.extend([
+        f"Dataset: {terrain['sourceName']}; source date: {terrain.get('sourceDate') or 'Not supplied'}",
+        f"Elevation resolution: {terrain['resolutionMeters']:g} m; estimated at: {terrain['estimatedAt']}",
+        f"Lengthwise: {along['percent']:+.1f}% ({along['direction']}) across {along['baselineMeters']:.2f} m, positive toward the container's far end",
+        f"Side-to-side: {across['percent']:+.1f}% ({across['direction']}) across {across['baselineMeters']:.2f} m, positive toward the right when looking toward the container",
+        f"Visual review cue: {terrain['thresholdPercent']:g}% absolute slope; this is not an equipment safety limit.",
+        f"Side samples are {terrain['lateralOffsetMeters']:g} m beyond each edge at the combined footprint midpoint.",
+    ])
+    labels = {"containerEnd": "Container far end", "truckFront": "Truck cab end", "left": "Left side", "right": "Right side"}
+    for key, label in labels.items():
+        sample = terrain["samples"][key]
+        lines.append(f"{label}: {sample['lat']:.7f}, {sample['lng']:.7f}; {sample['elevationMeters']:.2f} m elevation")
+    return lines + ["Nearest-neighbor terrain samples are estimates, not surveyed equipment support points. Four points cannot resolve curbs, grade breaks, or different truck/container planes."]

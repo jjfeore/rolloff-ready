@@ -192,11 +192,3 @@ class HereClient:
             labels = self._attribution_labels
         year = datetime.datetime.now(datetime.timezone.utc).year
         return f"© {year} HERE, {', '.join(labels)}"
-
-    def grade(self, placement):
-        # Do not probe quotas on user interaction or guess the SLOPES encoding.
-        return {
-            "status": "unavailable",
-            "message": "Measured street grade is unavailable. Confirm the drop site's slope with your hauler.",
-            "source": "HERE Map Attributes",
-        }

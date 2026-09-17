@@ -10,8 +10,9 @@ import uuid
 from dataclasses import dataclass, field
 
 from .here import HereClient
+from .usgs import UsgsClient
 from .mail import Mailer
-from .models import Problem, assess, assessment_input, customer, email_content, obj, placement, text
+from .models import Problem, assess, assessment_input, customer, email_content, obj, selected_address, site_input, text
 from .security import RateLimiter, Requests, Tokens, check_origin
 
 
@@ -52,9 +53,10 @@ def json_response(status, value):
 
 
 class Application:
-    def __init__(self, settings=None, here=None, mailer=None, tokens=None):
+    def __init__(self, settings=None, here=None, mailer=None, tokens=None, terrain=None):
         self.settings = settings or Settings.from_env()
         self.here = here or HereClient(self.settings.here_key)
+        self.terrain = terrain or UsgsClient()
         self.mailer = mailer or Mailer(self.settings.connection_string, self.settings.sender, self.settings.recipient)
         self.tokens = tokens or Tokens(self.settings.app_secret or secrets.token_urlsafe(48))
         self.limits, self.requests = RateLimiter(), Requests()
@@ -82,7 +84,7 @@ class Application:
             self.limits.take(("config", client), 30, 60)
             return json_response(200, {"mapsConfigured": bool(self.settings.here_key),
                                       "emailConfigured": self.mailer.configured,
-                                      "gradeEnabled": False, "formToken": self.tokens.issue(),
+                                      "gradeEnabled": True, "formToken": self.tokens.issue(),
                                       "attribution": self.here.attribution()})
         match = re.fullmatch(r"/api/tiles/(\d{1,2})/(\d{1,7})/(\d{1,7})", path)
         if match and method == "GET":
@@ -92,7 +94,7 @@ class Application:
                 raise Problem(400, "INVALID_TILE", "This map tile is outside the supported range.")
             image, content_type = self.here.tile(z, x, y)
             return Response(200, image, {"Content-Type": content_type, "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
-        allowed = {"/api/geocode", "/api/grade", "/api/assess", "/api/contact"}
+        allowed = {"/api/geocode", "/api/terrain-coverage", "/api/grade", "/api/assess", "/api/contact"}
         if path not in allowed:
             raise Problem(404, "NOT_FOUND", "This endpoint does not exist.")
         if method != "POST":
@@ -114,11 +116,23 @@ class Application:
             query = text(data.get("query"), "a US street address", 200, 8)
             items = self.here.geocode(query)
             return json_response(200, {"items": [{**item, "verification": self.tokens.sign_address(item)} for item in items]})
+        if path == "/api/terrain-coverage":
+            self.limits.take(("coverage", client), 12, 60)
+            self.limits.take("all-terrain", 120, 60)
+            address = selected_address(data.get("address"))
+            self.tokens.verify_address(address)
+            return json_response(200, self.terrain.coverage(address["position"]))
         if path == "/api/grade":
             self.limits.take(("grade", client), 12, 60)
-            return json_response(200, self.here.grade(placement(data.get("placement"))))
+            self.limits.take("all-terrain", 120, 60)
+            site = site_input(data)
+            self.tokens.verify_address(site["address"])
+            grade = self.terrain.grade(site["placement"])
+            return json_response(200, {**grade, "evidenceToken": self.tokens.sign_terrain(site["address"], site["placement"], grade)})
         validated = assessment_input(data)
         self.tokens.verify_address(validated["address"])
+        if data.get("terrainEvidence") is not None:
+            validated["terrain"] = self.tokens.verify_terrain(data["terrainEvidence"], validated["address"], validated["placement"])
         result = assess(validated)
         if path == "/api/assess":
             self.limits.take(("assess", client), 60, 60)

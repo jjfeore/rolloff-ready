@@ -36,8 +36,13 @@ class FakeHere:
     def tile(self, z, x, y):
         return b"fake-image-for-unit-test", "image/jpeg"
 
+
+class FakeTerrain:
     def grade(self, p):
-        return {"status": "unavailable", "message": "No verified street grade.", "source": "HERE Map Attributes"}
+        return {"status": "unavailable", "reason": "no_coverage", "message": "No verified 1-meter terrain data.", "source": "USGS 3DEP"}
+
+    def coverage(self, p):
+        return self.grade(p)
 
 
 class FakeMailer:
@@ -59,7 +64,7 @@ class ApiTests(unittest.TestCase):
         self.tokens = Tokens("unit-test-secret-do-not-use-in-production", lambda: self.now)
         self.mailer, self.here = FakeMailer(), FakeHere()
         self.settings = Settings(here_key="test-key-MUST-NOT-BE-RETURNED", app_secret="test-secret-is-at-least-thirty-two-characters")
-        self.app = Application(self.settings, self.here, self.mailer, self.tokens)
+        self.app = Application(self.settings, self.here, self.mailer, self.tokens, terrain=FakeTerrain())
         self.headers = {"Content-Type": "application/json", "Origin": "http://localhost:5173", "X-Rolloff-Token": self.tokens.issue()}
         self.now += 10
         SITE["address"]["verification"] = self.tokens.sign_address(SITE["address"])
@@ -78,7 +83,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertNotIn(self.settings.here_key.encode(), response.body)
         self.assertNotIn(self.settings.app_secret.encode(), response.body)
-        self.assertFalse(self.decode(response)["gradeEnabled"])
+        self.assertTrue(self.decode(response)["gradeEnabled"])
 
     def test_clear_answers_positive(self):
         response = self.post("assess", SITE)
@@ -121,7 +126,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.post("assess", data).status, 400)
 
     def test_nan_bool_and_invalid_container_rejected(self):
-        for field, value in (("lat", float("nan")), ("lat", True), ("containerSize", True), ("containerSize", 25), ("bearingDegrees", -1)):
+        for field, value in (("lat", float("nan")), ("lat", True), ("lat", 10 ** 400), ("containerSize", True), ("containerSize", 25), ("bearingDegrees", -1)):
             data = copy.deepcopy(SITE)
             data["placement"][field] = value
             self.assertEqual(self.post("assess", data).status, 400)
@@ -167,7 +172,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.app.handle("GET", "/api/unknown").status, 404)
 
     def test_grade_unavailable_does_not_become_zero(self):
-        result = self.decode(self.post("grade", {"placement": SITE["placement"]}))
+        result = self.decode(self.post("grade", {"address": SITE["address"], "placement": SITE["placement"]}))
         self.assertEqual(result["status"], "unavailable")
         self.assertNotIn("streetGradePercent", result)
 

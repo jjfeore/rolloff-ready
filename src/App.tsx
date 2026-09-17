@@ -1,11 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import catalog from '../api/rr/catalog.json';
-import { errorMessage, getConfig, post } from './api';
+import { ApiError, errorMessage, getConfig, post } from './api';
 import { destination, distance, normalizeBearing } from './geometry';
 import Icon from './Icons';
 import MapErrorBoundary from './MapErrorBoundary';
-import type { Address, Answers, Assessment, AssessmentInput, Config, Customer, Grade, Placement, Size } from './types';
+import { CoverageStatus, GradeAdvisory, InlineAdvisory } from './TerrainAdvisory';
+import { createLatestRequest, terrainConnectionFailure, terrainSummaryLines } from './terrain';
+import type { Address, Answers, Assessment, AssessmentInput, Config, Customer, Grade, Placement, Size, TerrainCoverage } from './types';
 
 const PlacementMap = lazy(() => import('./PlacementMap'));
 const steps = ['Your site', 'Place your box', 'Check the space', 'Your next step'];
@@ -27,10 +29,11 @@ function SizePicker({ value, onChange }: { value: Size; onChange: (size: Size) =
   </fieldset>;
 }
 
-function Question({ number, title, hint, value, options, onChange, error }: { number: string; title: string; hint?: string; value?: string; options: [string, string][]; onChange: (value: string) => void; error?: boolean }) {
+function Question({ number, title, hint, value, options, onChange, error, advisory }: { number: string; title: string; hint?: string; value?: string; options: [string, string][]; onChange: (value: string) => void; error?: boolean; advisory?: ReactNode }) {
   return <fieldset className={`question ${error ? 'question-error' : ''}`} tabIndex={-1}>
     <legend><span className="question-number">{number}</span>{title}</legend>
     {hint ? <p className="question-hint">{hint}</p> : null}
+    {advisory}
     <div className={`answer-options ${options.length === 4 ? 'four-options' : ''}`}>{options.map(([id, label]) => <label key={id} className={value === id ? 'selected' : ''}>
       <input type="radio" name={`question-${number}`} value={id} checked={value === id} onChange={() => onChange(id)} /><span>{label}</span>
     </label>)}</div>
@@ -80,8 +83,12 @@ function App() {
   const [mapReady, setMapReady] = useState(false);
   const [recenter, setRecenter] = useState(0);
   const [answers, setAnswers] = useState<Partial<Answers>>({});
+  const [coverage, setCoverage] = useState<TerrainCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
   const [grade, setGrade] = useState<Grade | null>(null);
   const [gradeLoading, setGradeLoading] = useState(false);
+  const [placementEdited, setPlacementEdited] = useState(false);
+  const [terrainRefreshRequired, setTerrainRefreshRequired] = useState(false);
   const [assessment, setAssessment] = useState<Assessment | null>(null);
   const [assessing, setAssessing] = useState(false);
   const [validation, setValidation] = useState(false);
@@ -92,13 +99,19 @@ function App() {
   const [sendError, setSendError] = useState('');
   const [accepted, setAccepted] = useState<{ requestId: string; message: string } | null>(null);
   const requestId = useRef(crypto.randomUUID());
-  const gradeSequence = useRef(0);
+  const gradeRequests = useRef(createLatestRequest());
+  const coverageRequests = useRef(createLatestRequest());
+  const submittedGrade = useRef<Grade | null>(null);
   const searchSequence = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
   const sidebar = useRef<HTMLElement>(null);
   const dimensions = catalog.containers.find(item => item.size === size)!;
 
   useEffect(() => { getConfig().then(setConfig).catch(error => setConfigError(errorMessage(error))); }, []);
+  useEffect(() => {
+    const gradeGate = gradeRequests.current, coverageGate = coverageRequests.current;
+    return () => { gradeGate.invalidate(); coverageGate.invalidate(); };
+  }, []);
   useEffect(() => {
     if (window.matchMedia('(max-width: 700px)').matches) {
       if (stage < 2) window.scrollTo({ top: 0, behavior: 'instant' });
@@ -109,12 +122,17 @@ function App() {
     heading.current?.focus({ preventScroll: true });
   }, [stage]);
 
-  function invalidate() { setAssessment(null); setAccepted(null); setSendError(''); requestId.current = crypto.randomUUID(); }
+  function invalidate() { setAssessment(null); setAccepted(null); setSendError(''); submittedGrade.current = null; requestId.current = crypto.randomUUID(); }
+  function invalidateTerrain() {
+    gradeRequests.current.invalidate();
+    setGrade(null); setGradeLoading(false); setTerrainRefreshRequired(false);
+    setPlacementEdited(Object.keys(answers).length > 0);
+  }
   function changeSize(next: Size) {
     setSize(next);
-    if (placement) { setPlacement({ ...placement, containerSize: next }); setConfirmed(false); invalidate(); }
+    if (placement) { setPlacement({ ...placement, containerSize: next }); setConfirmed(false); invalidateTerrain(); invalidate(); }
   }
-  function movePlacement(next: Placement) { setPlacement(next); setConfirmed(false); invalidate(); }
+  function movePlacement(next: Placement) { setPlacement(next); setConfirmed(false); invalidateTerrain(); invalidate(); }
   function nudge(direction: number) {
     if (!placement || !address) return;
     const next = { ...placement, ...destination(placement, direction, 0.3048) };
@@ -131,22 +149,40 @@ function App() {
     finally { if (sequence === searchSequence.current) setSearching(false); }
   }
   function selectAddress(item: Address) {
-    gradeSequence.current += 1;
+    gradeRequests.current.invalidate();
     setAddress(item); setQuery(item.label); setCandidates(null);
     setPlacement({ ...item.position, bearingDegrees: 0, containerSize: size });
     setConfirmed(false); setAnswers({}); setGrade(null); setGradeLoading(false); setValidation(false); setAssessmentError('');
+    setPlacementEdited(false); setTerrainRefreshRequired(false);
     invalidate(); setStage(1);
+    void loadCoverage(item);
   }
-  async function startCheck() {
-    if (!placement || !confirmed || !mapReady) return;
-    setStage(2); setGradeLoading(true); setGrade(null);
-    const sequence = ++gradeSequence.current;
+  async function loadCoverage(selectedAddress: Address) {
+    const request = coverageRequests.current.start();
+    setCoverage(null); setCoverageLoading(true);
     try {
-      const result = await post<Grade>('grade', { placement });
-      if (sequence === gradeSequence.current) setGrade(result);
+      const result = await post<TerrainCoverage>('terrain-coverage', { address: selectedAddress }, true, request.signal);
+      if (request.isCurrent()) setCoverage(result);
     } catch {
-      if (sequence === gradeSequence.current) setGrade({ status: 'unavailable', source: 'Road grade estimate', message: 'Automatic road information is unavailable here. Your observations below are the basis of this site check.' });
-    } finally { if (sequence === gradeSequence.current) setGradeLoading(false); }
+      if (request.isCurrent()) setCoverage(terrainConnectionFailure);
+    } finally { if (request.isCurrent()) setCoverageLoading(false); }
+  }
+  async function loadGrade() {
+    if (!address || !placement || !confirmed) return;
+    const request = gradeRequests.current.start();
+    setGradeLoading(true); setGrade(null); setTerrainRefreshRequired(false);
+    setAssessmentError(''); setSendError(''); setAccepted(null);
+    submittedGrade.current = null; requestId.current = crypto.randomUUID();
+    try {
+      const result = await post<Grade>('grade', { address, placement }, true, request.signal);
+      if (request.isCurrent()) setGrade(result);
+    } catch {
+      if (request.isCurrent()) setGrade(terrainConnectionFailure);
+    } finally { if (request.isCurrent()) setGradeLoading(false); }
+  }
+  function startCheck() {
+    if (!placement || !confirmed || !mapReady) return;
+    setStage(2); void loadGrade();
   }
   function updateAnswer(key: keyof Answers, value: string) {
     setAnswers(previous => {
@@ -157,7 +193,10 @@ function App() {
     setAssessmentError(''); invalidate();
   }
   function assessmentInput(): AssessmentInput {
-    return { address: address!, placement: placement!, answers: answers as Answers };
+    return { address: address!, placement: placement!, answers: answers as Answers, ...(grade?.evidenceToken ? { terrainEvidence: grade.evidenceToken } : {}) };
+  }
+  function terrainEvidenceError(error: unknown): boolean {
+    return error instanceof ApiError && ['TERRAIN_EVIDENCE_INVALID', 'TERRAIN_EVIDENCE_EXPIRED'].includes(error.code);
   }
   const requiredKeys: (keyof Answers)[] = ['space', 'obstructions', 'slope', ...(answers.slope === 'inline' ? ['inlineDirection' as const] : []), 'differentPlane', 'streetOverlap'];
   const unanswered = requiredKeys.filter(key => !answers[key]);
@@ -170,7 +209,7 @@ function App() {
     setAssessing(true);
     const version = requestId.current;
     try { const result = await post<Assessment>('assess', assessmentInput()); if (version === requestId.current) { setAssessment(result); setStage(3); } }
-    catch (error) { setAssessmentError(errorMessage(error)); }
+    catch (error) { if (version === requestId.current) { setAssessmentError(errorMessage(error)); setTerrainRefreshRequired(terrainEvidenceError(error)); } }
     finally { setAssessing(false); }
   }
   function updateCustomer(key: keyof Customer, value: string | boolean) {
@@ -180,16 +219,19 @@ function App() {
   async function send(event: FormEvent) {
     event.preventDefault();
     if (!customer.consent || !assessment || !config?.emailConfigured || sending) return;
+    submittedGrade.current = grade;
+    gradeRequests.current.invalidate(); setGradeLoading(false);
     setSending(true); setSendError('');
     try {
       const result = await post<{ status: 'accepted'; requestId: string; message: string }>('contact', { ...assessmentInput(), customer, website, requestId: requestId.current });
       if (result.status !== 'accepted') throw new Error('Unexpected response');
       setAccepted(result);
-    } catch (error) { setSendError(errorMessage(error)); }
+    } catch (error) { setSendError(errorMessage(error)); setTerrainRefreshRequired(terrainEvidenceError(error)); }
     finally { setSending(false); }
   }
   function downloadSummary() {
     if (!address || !placement || !assessment) return;
+    const summaryGrade = accepted ? submittedGrade.current : grade;
     const summary = [
       'ROLLOFF READY | SITE SUMMARY',
       `Created: ${new Date().toISOString()}`,
@@ -204,8 +246,7 @@ function App() {
       `Enough visible space: ${answerLabels[answers.space!]}`, `Obstructions present: ${answerLabels[answers.obstructions!]}`,
       `Drop-site slope: ${answerLabels[answers.slope!]}`, ...(answers.inlineDirection ? [`Inline slope direction: ${answerLabels[answers.inlineDirection]}`] : []),
       `Different slopes or planes: ${answerLabels[answers.differentPlane!]}`, `Street overlap: ${answerLabels[answers.streetOverlap!]}`, '',
-      `Automatic evidence: ${grade?.message ?? 'Unavailable'}`, `Evidence source: ${grade?.source ?? 'None'}`,
-      ...(grade?.status === 'available' ? [`Street grade: ${grade.streetGradePercent ?? 'Unknown'}%; along truck: ${grade.alongTruckPercent ?? 'Unknown'}%; across truck: ${grade.acrossTruckPercent ?? 'Unknown'}%`] : []), '',
+      ...terrainSummaryLines(summaryGrade), '',
       `Name: ${customer.name || 'Not provided'}`, `Email: ${customer.email || 'Not provided'}`, `Phone: ${customer.phone || 'Not provided'}`, `Notes: ${customer.notes || 'None'}`, '',
       'This is an early site screen, not delivery approval. Container dimensions, access, overhead clearance, ground conditions, permits and unloading safety must be confirmed by the operator.',
       '', 'Dimension sources:', ...catalog.sources.map(source => `${source.label}: ${source.url}`),
@@ -224,7 +265,7 @@ function App() {
     </header>
     <nav className="progress-nav" aria-label="Site check progress"><ol>{steps.map((label, index) => {
       const canVisit = index === 0 || index === 1 && !!placement || index === 2 && confirmed || index === 3 && !!assessment;
-      return <li key={label} className={`${stage === index ? 'current' : ''} ${stage > index ? 'completed' : ''}`}><button type="button" disabled={!canVisit || sending || assessing} onClick={() => setStage(index)} aria-current={stage === index ? 'step' : undefined}><span className="step-number">{stage > index ? <Icon name="check" size={15} /> : `0${index + 1}`}</span><span>{label}</span></button>{index < 3 ? <span className="step-line" /> : null}</li>;
+      return <li key={label} className={`${stage === index ? 'current' : ''} ${stage > index ? 'completed' : ''}`}><button type="button" disabled={!canVisit || sending || assessing} onClick={() => index === 2 && !grade && !gradeLoading ? startCheck() : setStage(index)} aria-current={stage === index ? 'step' : undefined}><span className="step-number">{stage > index ? <Icon name="check" size={15} /> : `0${index + 1}`}</span><span>{label}</span></button>{index < 3 ? <span className="step-line" /> : null}</li>;
     })}</ol><span className="progress-caption">A few minutes now. Fewer surprises later.</span></nav>
 
     <main id="main-content" className={`workspace stage-${stage}`}>
@@ -248,7 +289,7 @@ function App() {
             {candidates ? <div className="candidate-results" aria-live="polite">{candidates.length ? <><p className="candidate-heading">Choose your delivery address</p><ul>{candidates.map(item => <li key={item.id}><button onClick={() => selectAddress(item)}><Icon name="pin" size={18} /><span>{item.label}</span><Icon name="chevron" size={16} /></button></li>)}</ul></> : <p className="no-results">We couldn’t find that street address. Add a house number, city and state, then try again. US addresses only.</p>}</div> : null}
           </div>
           <ModelNotes />
-          <div className="quiet-note"><Icon name="shield" size={18} /><p>Your answers stay in this tab until you send a request. Address searches use HERE.</p></div>
+          <div className="quiet-note"><Icon name="shield" size={18} /><p>We don’t save your details in this browser. Address searches use HERE; site coordinates go to USGS for terrain estimates.</p></div>
         </> : null}
 
         {stage === 1 && address && placement ? <>
@@ -256,6 +297,7 @@ function App() {
           <h1 tabIndex={-1} ref={heading}>Find its spot.</h1>
           <p className="intro-text">Drag the green box where you’d like it delivered. Rotate the handle so the amber truck area lines up with the approach.</p>
           <div className="address-card"><Icon name="pin" /><span>{address.label}</span><button className="text-button" onClick={() => setStage(0)}>Change</button></div>
+          <CoverageStatus coverage={coverage} loading={coverageLoading} onRetry={() => void loadCoverage(address)} />
           <SizePicker value={size} onChange={changeSize} />
           <div className="dimensions-card"><div><i className="legend-box" /><span>Container footprint</span><strong>{dimensions.lengthFeet} × {dimensions.widthFeet} ft</strong></div><div><i className="legend-truck" /><span>Truck clearance</span><strong>{catalog.truck.lengthFeet} × {dimensions.widthFeet} ft</strong></div><p>{(dimensions.lengthFeet + catalog.truck.lengthFeet).toFixed(1)} ft of straight space, end to end</p></div>
           <div className="placement-controls">
@@ -277,15 +319,15 @@ function App() {
           <h1 tabIndex={-1} ref={heading}>A quick look around.</h1>
           <p className="intro-text">Maps only tell part of the story. Use what you know about the actual site. “Not sure” helps us flag what to review.</p>
           <div className="compact-address"><Icon name="pin" size={17} /><span>{address.label}</span><button className="text-button" onClick={() => setStage(1)}>Edit placement</button></div>
-          <div className="grade-note"><Icon name="info" size={17} /><div><strong>{gradeLoading ? 'Checking available road information…' : grade?.status === 'available' ? 'Supplemental road information' : 'Your observations matter'}</strong><p>{gradeLoading ? 'You can continue with the questions below.' : grade?.message ?? 'Your observations below are the basis of this site check.'}</p>{grade?.status === 'available' ? <><p>Road grade: {grade.streetGradePercent?.toFixed(1) ?? 'Unknown'}%. Road estimates do not measure your driveway slope or truck support.</p><small>Source: {grade.source}</small></> : null}</div></div>
+          {placementEdited ? <p className="placement-edited-note"><Icon name="info" size={16} /><span>Your placement changed. Your answers are still here; check them against the updated spot.</span></p> : null}
           <form onSubmit={assess} className="questionnaire" noValidate>
             <Question number="1" title="Does the whole footprint fit?" hint="Include both the green container and the full amber truck area." value={answers.space} options={[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('space', value)} error={validation && !answers.space} />
             <Question number="2" title="Are there any obstructions?" hint="Look for overhead wires, branches, parked cars, gates and anything in the approach." value={answers.obstructions} options={[["no", "None"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('obstructions', value)} error={validation && !answers.obstructions} />
-            <Question number="3" title="How does the drop-off area slope?" hint="Consider the ground under both the box and the truck." value={answers.slope} options={[["level", "Level"], ["sideways", "Sideways"], ["inline", "Along the truck"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('slope', value)} error={validation && !answers.slope} />
-            {answers.slope === 'inline' ? <div className="nested-question"><Question number="3b" title="Which way does the ground slope?" hint="From the truck toward the container’s far end." value={answers.inlineDirection} options={[["uphill", "Uphill"], ["downhill", "Downhill"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('inlineDirection', value)} error={validation && !answers.inlineDirection} /></div> : null}
-            <Question number="4" title="Will the truck and box be on different slopes or levels?" hint="For example, a level street meeting a sloping driveway, or a curb between them." value={answers.differentPlane} options={[["no", "Same plane"], ["yes", "Different"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('differentPlane', value)} error={validation && !answers.differentPlane} />
+            <Question number="3" title="How does the drop-off area slope?" hint="Consider the ground under both the box and the truck." advisory={<GradeAdvisory grade={grade} loading={gradeLoading} onRefresh={() => void loadGrade()} />} value={answers.slope} options={[["level", "Level"], ["sideways", "Sideways"], ["inline", "Along the truck"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('slope', value)} error={validation && !answers.slope} />
+            {answers.slope === 'inline' ? <div className="nested-question"><Question number="3b" title="Which way does the ground slope?" hint="From the truck toward the container’s far end." advisory={<InlineAdvisory grade={grade} loading={gradeLoading} />} value={answers.inlineDirection} options={[["uphill", "Uphill"], ["downhill", "Downhill"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('inlineDirection', value)} error={validation && !answers.inlineDirection} /></div> : null}
+            <Question number="4" title="Will the truck and box be on different slopes or levels?" hint="For example, a level street meeting a sloping driveway, or a curb between them." advisory={<p className="terrain-plane-note">Four terrain samples don’t establish whether the truck and box share a plane. Check this separately.</p>} value={answers.differentPlane} options={[["no", "Same plane"], ["yes", "Different"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('differentPlane', value)} error={validation && !answers.differentPlane} />
             <Question number="5" title="Does either area overlap the street?" hint="Street placement can need extra coordination or permits." value={answers.streetOverlap} options={[["no", "No"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('streetOverlap', value)} error={validation && !answers.streetOverlap} />
-            {assessmentError ? <Alert>{assessmentError}</Alert> : null}
+            {assessmentError ? <Alert>{assessmentError}{terrainRefreshRequired ? <button type="button" className="text-button" onClick={() => void loadGrade()}>Refresh terrain estimates, then try again</button> : null}</Alert> : null}
             {validation && unanswered.length ? <p className="field-error" role="alert">Please answer all {unanswered.length} remaining {unanswered.length === 1 ? 'question' : 'questions'}.</p> : null}
             <button className="button primary full" type="submit" disabled={assessing}>{assessing ? <><span className="spinner" /> Checking your site</> : <>See my next step <Icon name="arrow" /></>}</button>
             <button className="button quiet full" type="button" onClick={() => setStage(1)}>Back to placement</button>
@@ -302,7 +344,8 @@ function App() {
               <p>{assessment.outcome === 'likely_suitable' ? 'Your answers suggest this spot could work. Send the details for a quote and final delivery confirmation.' : 'A few site details need an operator’s eye. Send your plan so they can help find the right approach.'}</p>
               {assessment.reasons.length ? <ul className="result-reasons">{assessment.reasons.map(reason => <li key={reason}><Icon name={assessment.outcome === 'likely_suitable' ? 'check' : 'info'} size={15} /><span>{reason}</span></li>)}</ul> : null}
             </div>
-            <div className="request-summary"><div><Icon name="box" size={19} /><strong>{size} yd³ container</strong><span>{dimensions.lengthFeet} × {dimensions.widthFeet} ft</span></div><p><Icon name="pin" size={16} />{address.label}</p><button className="text-button" onClick={() => setStage(2)}>Review my answers</button></div>
+            <div className="request-summary"><div><Icon name="box" size={19} /><strong>{size} yd³ container</strong><span>{dimensions.lengthFeet} × {dimensions.widthFeet} ft</span></div><p><Icon name="pin" size={16} />{address.label}</p><button className="text-button" disabled={sending} onClick={() => setStage(2)}>Review my answers</button></div>
+            <p className="request-terrain-status" role="status">{gradeLoading ? 'Terrain estimates are still loading. Sending now will include your manual answers without an estimate.' : grade?.evidenceToken ? 'Your USGS terrain result will accompany your site answers as advisory information.' : 'Your manual site answers are included. No USGS terrain estimate is attached.'}</p>
             <form onSubmit={send} className="contact-form">
               <h2>{assessment.outcome === 'likely_suitable' ? 'Request your quote' : 'Request a delivery review'}</h2><p className="input-hint">Your placement and site answers are included automatically.</p>
               {!config?.emailConfigured ? <div className="email-unavailable"><Icon name="info" size={18} /><p>Email requests are unavailable right now. You can still save your site summary below.</p></div> : null}
@@ -314,7 +357,7 @@ function App() {
                 <div className="honeypot" aria-hidden="true"><label htmlFor="website">Leave this field blank</label><input id="website" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={event => setWebsite(event.target.value)} /></div>
                 <label className="checkbox-label consent"><input type="checkbox" checked={customer.consent} onChange={event => updateCustomer('consent', event.target.checked)} required /><span>I agree to share my contact information and site details with the operator for this request.</span></label>
               </fieldset>
-              {sendError ? <Alert>{sendError} You can also save your summary below.<p className="request-reference">Request reference<br /><code>{requestId.current}</code></p></Alert> : null}
+              {sendError ? <Alert>{sendError} You can also save your summary below.<p className="request-reference">Request reference<br /><code>{requestId.current}</code></p>{terrainRefreshRequired ? <button type="button" className="text-button" onClick={() => void loadGrade()}>Refresh terrain estimates, then try again</button> : null}</Alert> : null}
               <button type="submit" className="button primary full" disabled={sending || !config?.emailConfigured}>{sending ? <><span className="spinner" /> Sending your request</> : <><Icon name="mail" size={18} /> {assessment.outcome === 'likely_suitable' ? 'Send quote request' : 'Send review request'}</>}</button>
               <button type="button" className="button secondary full download-button" onClick={downloadSummary}><Icon name="download" size={18} /> Download site summary</button><p className="download-caption">Downloading saves a file. It does not send a request.</p>
             </form>

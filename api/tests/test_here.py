@@ -222,13 +222,5 @@ class HereClientTests(unittest.TestCase):
             first = self.client.attribution()
             self.assertEqual(self.client.attribution(), first)
 
-    def test_grade_never_fetches_or_invents_measurement(self):
-        grade = self.client.grade({"lat": 47.6, "lng": -122.3})
-        self.assertEqual(grade["status"], "unavailable")
-        self.assertEqual(grade["source"], "HERE Map Attributes")
-        self.assertNotIn("gradePercent", grade)
-        self.client._opener.open.assert_not_called()
-
-
 if __name__ == "__main__":
     unittest.main()
