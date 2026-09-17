@@ -1,0 +1,19 @@
+{
+  "truck": {
+    "representativeLengthFeet": 36,
+    "clearanceFactor": 1.2,
+    "lengthFeet": 43.2,
+    "source": "Agri Service publishes a 36-foot roll-off truck. The placement model adds 20% to this representative length; this is not a measured fleet average."
+  },
+  "containers": [
+    { "size": 10, "lengthFeet": 12, "widthFeet": 8, "heightFeet": 4, "description": "Small cleanouts" },
+    { "size": 15, "lengthFeet": 16, "widthFeet": 8, "heightFeet": 4.5, "description": "Garage or room remodel" },
+    { "size": 20, "lengthFeet": 22, "widthFeet": 8, "heightFeet": 4.5, "description": "Home renovation" },
+    { "size": 30, "lengthFeet": 22, "widthFeet": 8, "heightFeet": 6, "description": "Large renovation" },
+    { "size": 40, "lengthFeet": 22, "widthFeet": 8, "heightFeet": 8, "description": "Major cleanout" }
+  ],
+  "sources": [
+    { "label": "Representative container dimensions · Waste Haul", "url": "https://www.wastehaul.com/roll-off-dumpster-sizes" },
+    { "label": "Representative roll-off truck · Agri Service", "url": "https://agriserviceinc.com/delivery-services-wm/" }
+  ]
+}
