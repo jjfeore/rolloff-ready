@@ -45,7 +45,6 @@ function ModelNotes() {
   return <details className="model-notes"><summary><Icon name="info" size={15} /> About these dimensions</summary><div>
     <p>These are representative exterior dimensions. Actual containers and trucks vary by provider.</p>
     <p>The amber area is a straight clearance estimate: a {catalog.truck.representativeLengthFeet} ft truck plus 20%, or {catalog.truck.lengthFeet} ft. For this screen, it uses the container’s width. Turning room, stabilizers, overhead clearance and ground strength still need an operator’s review.</p>
-    {catalog.sources.map(source => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.label} ↗</a>)}
   </div></details>;
 }
 
@@ -243,13 +242,12 @@ function App() {
       `Representative exterior: ${dimensions.lengthFeet} ft L x ${dimensions.widthFeet} ft W x ${dimensions.heightFeet} ft H`,
       `Truck clearance: ${catalog.truck.lengthFeet} ft L x ${dimensions.widthFeet} ft W (36 ft representative truck + 20%)`,
       `Placement center: ${placement.lat.toFixed(7)}, ${placement.lng.toFixed(7)}`, `Bearing: ${placement.bearingDegrees.toFixed(1)} degrees clockwise from north`, '',
-      `Enough visible space: ${answerLabels[answers.space!]}`, `Obstructions present: ${answerLabels[answers.obstructions!]}`,
+      `Container footprint fits: ${answerLabels[answers.space!]}`, `Obstructions in delivery or truck clearance areas: ${answerLabels[answers.obstructions!]}`,
       `Drop-site slope: ${answerLabels[answers.slope!]}`, ...(answers.inlineDirection ? [`Inline slope direction: ${answerLabels[answers.inlineDirection]}`] : []),
-      `Different slopes or planes: ${answerLabels[answers.differentPlane!]}`, `Street overlap: ${answerLabels[answers.streetOverlap!]}`, '',
+      `Different slopes or planes: ${answerLabels[answers.differentPlane!]}`, `Container placement overlaps street: ${answerLabels[answers.streetOverlap!]}`, '',
       ...terrainSummaryLines(summaryGrade), '',
       `Name: ${customer.name || 'Not provided'}`, `Email: ${customer.email || 'Not provided'}`, `Phone: ${customer.phone || 'Not provided'}`, `Notes: ${customer.notes || 'None'}`, '',
       'This is an early site screen, not delivery approval. Container dimensions, access, overhead clearance, ground conditions, permits and unloading safety must be confirmed by the operator.',
-      '', 'Dimension sources:', ...catalog.sources.map(source => `${source.label}: ${source.url}`),
     ].join('\n');
     const url = URL.createObjectURL(new Blob([summary], { type: 'text/plain;charset=utf-8' }));
     const link = document.createElement('a'); link.href = url; link.download = 'rolloff-ready-site-summary.txt'; link.click();
@@ -321,12 +319,12 @@ function App() {
           <div className="compact-address"><Icon name="pin" size={17} /><span>{address.label}</span><button className="text-button" onClick={() => setStage(1)}>Edit placement</button></div>
           {placementEdited ? <p className="placement-edited-note"><Icon name="info" size={16} /><span>Your placement changed. Your answers are still here; check them against the updated spot.</span></p> : null}
           <form onSubmit={assess} className="questionnaire" noValidate>
-            <Question number="1" title="Does the whole footprint fit?" hint="Include both the green container and the full amber truck area." value={answers.space} options={[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('space', value)} error={validation && !answers.space} />
-            <Question number="2" title="Are there any obstructions?" hint="Look for overhead wires, branches, parked cars, gates and anything in the approach." value={answers.obstructions} options={[["no", "None"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('obstructions', value)} error={validation && !answers.obstructions} />
+            <Question number="1" title="Does the container footprint fit?" hint="Make sure that the entire green container area fits cleanly within your intended delivery area." value={answers.space} options={[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('space', value)} error={validation && !answers.space} />
+            <Question number="2" title="Are there any obstructions in the delivery or truck clearance areas?" hint="Look for overhead obstructions within 24 feet of the ground (utility wires and branches), parked cars, gates and anything in the approach." value={answers.obstructions} options={[["no", "None"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('obstructions', value)} error={validation && !answers.obstructions} />
             <Question number="3" title="How does the drop-off area slope?" hint="Consider the ground under both the box and the truck." advisory={<GradeAdvisory grade={grade} loading={gradeLoading} onRefresh={() => void loadGrade()} />} value={answers.slope} options={[["level", "Level"], ["sideways", "Sideways"], ["inline", "Along the truck"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('slope', value)} error={validation && !answers.slope} />
             {answers.slope === 'inline' ? <div className="nested-question"><Question number="3b" title="Which way does the ground slope?" hint="From the truck toward the container’s far end." advisory={<InlineAdvisory grade={grade} loading={gradeLoading} />} value={answers.inlineDirection} options={[["uphill", "Uphill"], ["downhill", "Downhill"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('inlineDirection', value)} error={validation && !answers.inlineDirection} /></div> : null}
             <Question number="4" title="Will the truck and box be on different slopes or levels?" hint="For example, a level street meeting a sloping driveway, or a curb between them." advisory={<p className="terrain-plane-note">Four terrain samples don’t establish whether the truck and box share a plane. Check this separately.</p>} value={answers.differentPlane} options={[["no", "Same plane"], ["yes", "Different"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('differentPlane', value)} error={validation && !answers.differentPlane} />
-            <Question number="5" title="Does either area overlap the street?" hint="Street placement can need extra coordination or permits." value={answers.streetOverlap} options={[["no", "No"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('streetOverlap', value)} error={validation && !answers.streetOverlap} />
+            <Question number="5" title="Does the container placement area overlap the street?" hint="Street placement can need extra coordination or permits." value={answers.streetOverlap} options={[["no", "No"], ["yes", "Yes"], ["unsure", "Not sure"]]} onChange={value => updateAnswer('streetOverlap', value)} error={validation && !answers.streetOverlap} />
             {assessmentError ? <Alert>{assessmentError}{terrainRefreshRequired ? <button type="button" className="text-button" onClick={() => void loadGrade()}>Refresh terrain estimates, then try again</button> : null}</Alert> : null}
             {validation && unanswered.length ? <p className="field-error" role="alert">Please answer all {unanswered.length} remaining {unanswered.length === 1 ? 'question' : 'questions'}.</p> : null}
             <button className="button primary full" type="submit" disabled={assessing}>{assessing ? <><span className="spinner" /> Checking your site</> : <>See my next step <Icon name="arrow" /></>}</button>

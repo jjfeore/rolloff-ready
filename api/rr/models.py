@@ -127,7 +127,7 @@ def assess(data):
     answers = data["answers"]
     reasons = []
     if answers["space"] != "yes":
-        reasons.append("The full truck and container space needs to be checked.")
+        reasons.append("The container footprint needs to be checked against the intended delivery area.")
     if answers["obstructions"] != "no":
         reasons.append("Obstructions or overhead clearance need an operator's review.")
     slope = answers["slope"]
@@ -145,12 +145,12 @@ def assess(data):
     if answers["differentPlane"] != "no":
         reasons.append("The truck and container may stand on different planes or across a grade change.")
     if answers["streetOverlap"] != "no":
-        reasons.append("Use of the street or sidewalk needs an access and permit check.")
+        reasons.append("Container placement in the street needs an access and permit check.")
     review = bool(reasons)
     return {
         "outcome": "review_needed" if review else "likely_suitable",
         "headline": "Let's take a closer look at your delivery." if review else "Your site looks promising.",
-        "reasons": reasons if review else ["You confirmed clear space, a level drop site, and a shared level surface for the truck and container."],
+        "reasons": reasons if review else ["You confirmed clear container space, a level drop site, and a shared level surface for the truck and container."],
         "summary": "An operator can review these details and help find a workable placement." if review else "Your answers suggest a straightforward placement. An operator will confirm access and equipment before delivery.",
     }
 
@@ -174,9 +174,9 @@ def email_content(data, person, result, request_id):
     p, a = data["placement"], data["answers"]
     box = CONTAINERS[p["containerSize"]]
     heading = "Delivery review and quote" if result["outcome"] == "review_needed" else "Quote request"
-    labels = {"space": "Enough room for the full overlay", "obstructions": "Obstructions present",
+    labels = {"space": "Container footprint fits", "obstructions": "Obstructions in delivery or truck clearance areas",
               "slope": "Drop-site slope", "inlineDirection": "Slope from truck toward container",
-              "differentPlane": "Truck and container on different planes", "streetOverlap": "Street or sidewalk overlap"}
+              "differentPlane": "Truck and container on different planes", "streetOverlap": "Container placement overlaps street"}
     lines = ["ROLLOFF READY", heading, f"Request ID: {request_id}", "", "CONTACT",
              f"Name: {person['name']}", f"Email: {person['email']}", f"Phone: {person['phone'] or 'Not provided'}",
              "", "SITE", data["address"]["label"],

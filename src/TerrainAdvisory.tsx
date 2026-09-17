@@ -21,7 +21,7 @@ function AxisCard({ axis, orientation, threshold }: { axis: TerrainAxis; orienta
     {view ? <>
       <div className="terrain-axis-value"><strong>{view.percent}</strong><Icon name={view.tone === 'low' ? 'check' : 'info'} size={17} /></div>
       <span className="terrain-axis-cue">{view.description}</span>
-      <span>{view.direction}</span><small>Sampled over {view.baseline}</small>
+      <span>{view.direction}</span>
     </> : <><strong className="terrain-unknown">Estimate unavailable</strong><span>Confirm this direction on site.</span></>}
   </div>;
 }
@@ -44,5 +44,5 @@ export function GradeAdvisory({ grade, loading, onRefresh }: { grade: Grade | nu
 
 export function InlineAdvisory({ grade, loading }: { grade: Grade | null; loading: boolean }) {
   const along = !loading && grade?.status === 'available' ? terrainAxisView(grade.along, 'along', grade.thresholdPercent) : null;
-  return <p className={`terrain-inline ${along?.tone ?? ''}`}><Icon name="info" size={14} /><span>{loading ? 'The along-direction estimate is loading. Choose what you observe.' : along ? `Along-direction estimate: ${along.direction.toLowerCase()} (${along.percent} over ${along.baseline}). Confirm what you observe.` : 'No along-direction estimate is available. Choose what you observe.'}</span></p>;
+  return <p className={`terrain-inline ${along?.tone ?? ''}`}><Icon name="info" size={14} /><span>{loading ? 'The along-direction estimate is loading. Choose what you observe.' : along ? `Along-direction estimate: ${along.direction.toLowerCase()} (${along.percent}). Confirm what you observe.` : 'No along-direction estimate is available. Choose what you observe.'}</span></p>;
 }
