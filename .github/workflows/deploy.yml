@@ -1,0 +1,100 @@
+name: Deploy Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Optional full 40-character main commit SHA to roll back to
+        type: string
+        required: false
+      confirmation:
+        description: For rollback type ROLLBACK rolloff-ready
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rolloff-ready-production
+  cancel-in-progress: false
+
+jobs:
+  revision:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select current commit or verify a rollback commit on main
+        id: revision
+        env:
+          ROLLBACK_SHA: ${{ inputs.commit_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$GITHUB_SHA"
+          if [ -n "$ROLLBACK_SHA" ]; then
+            [[ "$ROLLBACK_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Provide a full lowercase commit SHA.'; exit 1; }
+            [[ "$CONFIRMATION" == 'ROLLBACK rolloff-ready' ]] || { echo 'Rollback confirmation did not match.'; exit 1; }
+            git merge-base --is-ancestor "$ROLLBACK_SHA" origin/main
+            revision="$ROLLBACK_SHA"
+          fi
+          echo "sha=$revision" >> "$GITHUB_OUTPUT"
+  checks:
+    needs: revision
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.revision.outputs.sha }}
+  deploy:
+    needs: [revision, checks]
+    if: vars.AZURE_DEPLOY_ENABLED == 'true'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Get a masked deployment token for the verified project
+        id: site
+        run: python scripts/cloud.py deployment-token
+      - name: Deploy frontend and managed Python API
+        uses: Azure/static-web-apps-deploy@4d27395796ac319302594769cfe812bd207490b1 # v1 branch
+        with:
+          azure_static_web_apps_api_token: ${{ steps.site.outputs.token }}
+          action: upload
+          app_location: dist
+          api_location: api
+          output_location: ''
+          skip_app_build: true
+          production_branch: main
+      - name: Verify public configuration endpoint
+        env:
+          SITE_HOSTNAME: ${{ steps.site.outputs.hostname }}
+        run: python scripts/smoke_cloud.py

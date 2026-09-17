@@ -1,0 +1,58 @@
+name: Provision Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_email:
+        description: Provision metered Azure Communication Services Email
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rolloff-ready-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+  provision:
+    needs: checks
+    if: github.ref == 'refs/heads/main' && vars.AZURE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'westus2' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@8216e11d8cd9b42fe925c852af8e76311ff067ac # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: az bicep install --version v0.47.16
+      - name: Provision resource group contents and secure application settings
+        id: provision
+        env:
+          HERE_MAPS_API_KEY: ${{ secrets.HERE_MAPS_API_KEY }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          ENABLE_EMAIL: ${{ inputs.enable_email }}
+        run: python scripts/cloud.py provision --enable-email "$ENABLE_EMAIL"
+      - name: Show next step
+        env:
+          HOSTNAME: ${{ steps.provision.outputs.hostname }}
+        run: |
+          echo "Resources configured for https://$HOSTNAME" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run Deploy Azure to upload the tested frontend and API." >> "$GITHUB_STEP_SUMMARY"
