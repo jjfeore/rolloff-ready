@@ -36,7 +36,7 @@ _NETWORK_SLOTS = threading.BoundedSemaphore(4)
 _FIELDS = "OBJECTID,Name,LowPS,AcquisitionDate,Category,Source,VerticalDatum,title"
 _SUPPORTED_DATUMS = {"navd88", "navd 88", "north american vertical datum of 1988 (navd 88)", "north american vertical datum of 1988 (navd88)"}
 _MESSAGES = {
-    "no_coverage": "High-resolution terrain data could not be confirmed at this location.",
+    "no_coverage": "High-resolution terrain data not available for this site.",
     "incomplete_coverage": "One source could not provide all four terrain samples for this placement.",
     "unsupported_source": "Terrain source resolution or provenance could not be verified.",
     "service_unavailable": "Terrain data is temporarily unavailable. Please try again later.",

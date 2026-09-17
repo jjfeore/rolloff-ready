@@ -57,12 +57,12 @@ describe('terrain advisory interpretation', () => {
   it('keeps service failure separate from lack of coverage', () => {
     const noCoverage = terrainUnavailableText({ status: 'unavailable', source: 'USGS 3DEP', reason: 'no_coverage', message: 'Missing' });
     const failure = terrainUnavailableText({ status: 'unavailable', source: 'USGS 3DEP', reason: 'service_unavailable', message: 'Timed out' });
-    expect(noCoverage.title).toContain('No high-resolution');
-    expect(failure.title).toContain('could not be checked');
+    expect(noCoverage.title).toBe('High-resolution terrain data not available for this site');
+    expect(failure.title).toContain('temporarily unavailable');
     expect(failure.detail).toContain('does not establish');
     const html = renderToStaticMarkup(<CoverageStatus coverage={{ status: 'unavailable', source: 'USGS 3DEP', reason: 'service_unavailable', message: 'Timed out' }} loading={false} onRetry={() => {}} />);
     expect(html).toContain('Retry coverage check');
-    expect(html).not.toContain('No high-resolution');
+    expect(html).not.toContain(noCoverage.title);
   });
   it('limits the inline-direction hint to the along axis', () => {
     const html = renderToStaticMarkup(<InlineAdvisory grade={available} loading={false} />);

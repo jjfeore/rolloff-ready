@@ -27,15 +27,16 @@ export const terrainConnectionFailure: TerrainUnavailable = {
 };
 
 export function terrainUnavailableText(value: TerrainUnavailable): { title: string; detail: string } {
+  const unavailableTitle = 'High-resolution terrain data not available for this site';
   switch (value.reason) {
     case 'no_coverage':
-      return { title: 'No high-resolution USGS slope estimate for this site', detail: 'USGS 1 m terrain data is unavailable here. Use your own observations for the questions below.' };
+      return { title: unavailableTitle, detail: 'USGS 1 m terrain data is unavailable here. Use your own observations for the questions below.' };
     case 'unsupported_source':
-      return { title: 'High-resolution terrain source could not be verified', detail: 'The source resolution or provenance could not be confirmed, so no estimate is shown. Use your own observations.' };
+      return { title: unavailableTitle, detail: 'The source resolution or provenance could not be confirmed, so no estimate is shown. Use your own observations.' };
     case 'incomplete_coverage':
-      return { title: 'Not enough terrain data for this placement', detail: 'One verified USGS 1 m source could not provide all four samples. No combined estimate is shown; use your own observations.' };
+      return { title: unavailableTitle, detail: 'One verified USGS 1 m source could not provide all four samples. No combined estimate is shown; use your own observations.' };
     default:
-      return { title: 'USGS terrain could not be checked', detail: 'This does not establish whether high-resolution data covers the site. You can continue with your observations or retry.' };
+      return { title: 'Terrain data is temporarily unavailable', detail: 'This does not establish whether high-resolution data covers the site. You can continue with your observations or retry.' };
   }
 }
 
